@@ -1,0 +1,625 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebDOOM - Infinite Carnage</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Courier New', monospace;
+            color: #fff;
+        }
+        #gameCanvas {
+            display: block;
+            width: 100vw;
+            height: 100vh;
+        }
+        #hud {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            font-size: 18px;
+            text-shadow: 2px 2px 4px #000;
+        }
+        #buffIndicator {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            font-size: 16px;
+            color: #0f0;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="hud">
+        HEALTH: <span id="health">100</span> | 
+        AMMO: <span id="ammo">∞</span> | 
+        KILLS: <span id="kills">0</span> | 
+        WAVE: <span id="wave">1</span>
+    </div>
+    <div id="buffIndicator"></div>
+
+    <script>
+        // Game setup
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // Game state
+        const state = {
+            player: {
+                x: canvas.width / 2,
+                y: canvas.height / 2,
+                radius: 20,
+                health: 100,
+                maxHealth: 100,
+                speed: 5,
+                angle: 0,
+                weapons: {
+                    current: 'pistol',
+                    pistol: {
+                        damage: 25,
+                        fireRate: 500,
+                        lastShot: 0,
+                        infiniteAmmo: true
+                    },
+                    shotgun: {
+                        damage: 10,
+                        fireRate: 1000,
+                        lastShot: 0,
+                        pellets: 8,
+                        spread: 0.2,
+                        infiniteAmmo: true
+                    }
+                },
+                buffs: {
+                    damage: 1,
+                    speed: 1,
+                    healthRegen: 0,
+                    active: []
+                }
+            },
+            enemies: [],
+            projectiles: [],
+            particles: [],
+            kills: 0,
+            wave: 1,
+            lastEnemySpawn: 0,
+            enemySpawnRate: 2000,
+            lastBuffSpawn: 0,
+            buffSpawnRate: 15000,
+            buffs: [],
+            gameTime: 0,
+            shadows: []
+        };
+
+        // Buff types
+        const buffTypes = [
+            { type: 'damage', color: '#f00', duration: 10000, multiplier: 2 },
+            { type: 'speed', color: '#0af', duration: 10000, multiplier: 1.5 },
+            { type: 'healthRegen', color: '#0f0', duration: 15000, value: 1 }
+        ];
+
+        // Enemy types
+        const enemyTypes = [
+            { color: '#f00', speed: 1.5, radius: 15, health: 30 },
+            { color: '#f80', speed: 2, radius: 12, health: 20 },
+            { color: '#8f0', speed: 2.5, radius: 10, health: 15 }
+        ];
+
+        // Resize handler
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        // Mouse movement
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+            
+            state.player.angle = Math.atan2(mouseY - state.player.y, mouseX - state.player.x);
+        });
+
+        // Mouse click (shooting)
+        canvas.addEventListener('click', (e) => {
+            shoot();
+        });
+
+        // Keyboard controls
+        const keys = {
+            w: false, a: false, s: false, d: false,
+            '1': false, '2': false
+        };
+
+        window.addEventListener('keydown', (e) => {
+            if (keys.hasOwnProperty(e.key)) keys[e.key] = true;
+            
+            // Weapon switching
+            if (e.key === '1') state.player.weapons.current = 'pistol';
+            if (e.key === '2') state.player.weapons.current = 'shotgun';
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (keys.hasOwnProperty(e.key)) keys[e.key] = false;
+        });
+
+        // Game loop
+        function gameLoop(timestamp) {
+            update(timestamp);
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Update game state
+        function update(timestamp) {
+            state.gameTime = timestamp;
+            
+            // Player movement
+            const moveX = (keys.d ? 1 : 0) + (keys.a ? -1 : 0);
+            const moveY = (keys.s ? 1 : 0) + (keys.w ? -1 : 0);
+            
+            const moveLength = Math.sqrt(moveX * moveX + moveY * moveY);
+            if (moveLength > 0) {
+                const normX = moveX / moveLength;
+                const normY = moveY / moveLength;
+                
+                state.player.x += normX * state.player.speed * state.player.buffs.speed;
+                state.player.y += normY * state.player.speed * state.player.buffs.speed;
+            }
+            
+            // Keep player in bounds
+            state.player.x = Math.max(state.player.radius, Math.min(canvas.width - state.player.radius, state.player.x));
+            state.player.y = Math.max(state.player.radius, Math.min(canvas.height - state.player.radius, state.player.y));
+            
+            // Health regen
+            if (state.player.buffs.healthRegen > 0) {
+                state.player.health = Math.min(state.player.maxHealth, state.player.health + state.player.buffs.healthRegen * 0.016);
+            }
+            
+            // Update active buffs
+            updateBuffs(timestamp);
+            
+            // Spawn enemies
+            if (timestamp - state.lastEnemySpawn > state.enemySpawnRate) {
+                spawnEnemy();
+                state.lastEnemySpawn = timestamp;
+                
+                // Increase spawn rate with each wave
+                state.enemySpawnRate = Math.max(500, 2000 - state.wave * 100);
+            }
+            
+            // Spawn buffs
+            if (timestamp - state.lastBuffSpawn > state.buffSpawnRate) {
+                spawnBuff();
+                state.lastBuffSpawn = timestamp;
+            }
+            
+            // Update enemies
+            for (let i = state.enemies.length - 1; i >= 0; i--) {
+                const enemy = state.enemies[i];
+                
+                // Move toward player
+                const angle = Math.atan2(state.player.y - enemy.y, state.player.x - enemy.x);
+                enemy.x += Math.cos(angle) * enemy.speed;
+                enemy.y += Math.sin(angle) * enemy.speed;
+                
+                // Check collision with player
+                const dx = state.player.x - enemy.x;
+                const dy = state.player.y - enemy.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < state.player.radius + enemy.radius) {
+                    state.player.health -= 1;
+                    
+                    // Knockback
+                    const knockback = 5;
+                    enemy.x -= Math.cos(angle) * knockback;
+                    enemy.y -= Math.sin(angle) * knockback;
+                    
+                    // Player knockback
+                    state.player.x += Math.cos(angle) * knockback;
+                    state.player.y += Math.sin(angle) * knockback;
+                }
+                
+                // Check if enemy is dead
+                if (enemy.health <= 0) {
+                    state.enemies.splice(i, 1);
+                    state.kills++;
+                    spawnParticles(enemy.x, enemy.y, enemy.color, 10);
+                    
+                    // Update HUD
+                    document.getElementById('kills').textContent = state.kills;
+                    
+                    // Check for new wave
+                    if (state.enemies.length === 0) {
+                        state.wave++;
+                        document.getElementById('wave').textContent = state.wave;
+                        state.lastEnemySpawn = timestamp;
+                    }
+                }
+            }
+            
+            // Update projectiles
+            for (let i = state.projectiles.length - 1; i >= 0; i--) {
+                const proj = state.projectiles[i];
+                
+                proj.x += Math.cos(proj.angle) * proj.speed;
+                proj.y += Math.sin(proj.angle) * proj.speed;
+                
+                // Check if out of bounds
+                if (proj.x < 0 || proj.x > canvas.width || proj.y < 0 || proj.y > canvas.height) {
+                    state.projectiles.splice(i, 1);
+                    continue;
+                }
+                
+                // Check collision with enemies
+                for (let j = 0; j < state.enemies.length; j++) {
+                    const enemy = state.enemies[j];
+                    const dx = proj.x - enemy.x;
+                    const dy = proj.y - enemy.y;
+                    const distance = Math.sqrt(dx * dx + dy * dy);
+                    
+                    if (distance < enemy.radius) {
+                        enemy.health -= proj.damage * state.player.buffs.damage;
+                        state.projectiles.splice(i, 1);
+                        
+                        // Blood effect
+                        spawnParticles(enemy.x, enemy.y, enemy.color, 3);
+                        break;
+                    }
+                }
+            }
+            
+            // Update particles
+            for (let i = state.particles.length - 1; i >= 0; i--) {
+                const part = state.particles[i];
+                part.x += part.vx;
+                part.y += part.vy;
+                part.life--;
+                
+                if (part.life <= 0) {
+                    state.particles.splice(i, 1);
+                }
+            }
+            
+            // Update buffs
+            for (let i = state.buffs.length - 1; i >= 0; i--) {
+                const buff = state.buffs[i];
+                
+                // Check player collision
+                const dx = state.player.x - buff.x;
+                const dy = state.player.y - buff.y;
+                const distance = Math.sqrt(dx * dx + dy * dy);
+                
+                if (distance < state.player.radius + buff.radius) {
+                    applyBuff(buff.type, timestamp);
+                    state.buffs.splice(i, 1);
+                }
+            }
+            
+            // Update HUD
+            document.getElementById('health').textContent = Math.floor(state.player.health);
+            
+            // Game over check
+            if (state.player.health <= 0) {
+                alert(`GAME OVER! You killed ${state.kills} enemies and reached wave ${state.wave}.`);
+                resetGame();
+            }
+        }
+
+        // Render game
+        function render() {
+            // Clear canvas
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Draw shadows first
+            renderShadows();
+            
+            // Draw buffs
+            for (const buff of state.buffs) {
+                ctx.beginPath();
+                ctx.arc(buff.x, buff.y, buff.radius, 0, Math.PI * 2);
+                ctx.fillStyle = buff.color;
+                ctx.fill();
+                
+                // Pulse effect
+                const pulse = Math.sin(Date.now() * 0.005) * 3;
+                ctx.beginPath();
+                ctx.arc(buff.x, buff.y, buff.radius + pulse, 0, Math.PI * 2);
+                ctx.strokeStyle = buff.color;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+            
+            // Draw enemies
+            for (const enemy of state.enemies) {
+                // Enemy body
+                ctx.beginPath();
+                ctx.arc(enemy.x, enemy.y, enemy.radius, 0, Math.PI * 2);
+                ctx.fillStyle = enemy.color;
+                ctx.fill();
+                
+                // Enemy health bar
+                const healthPercent = enemy.health / enemy.maxHealth;
+                ctx.fillStyle = '#f00';
+                ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 10, enemy.radius * 2, 5);
+                ctx.fillStyle = '#0f0';
+                ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 10, enemy.radius * 2 * healthPercent, 5);
+            }
+            
+            // Draw projectiles
+            for (const proj of state.projectiles) {
+                ctx.beginPath();
+                ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2);
+                ctx.fillStyle = proj.color;
+                ctx.fill();
+            }
+            
+            // Draw particles
+            for (const part of state.particles) {
+                ctx.beginPath();
+                ctx.arc(part.x, part.y, part.radius, 0, Math.PI * 2);
+                ctx.fillStyle = part.color;
+                ctx.globalAlpha = part.life / part.maxLife;
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+            
+            // Draw player
+            ctx.save();
+            ctx.translate(state.player.x, state.player.y);
+            ctx.rotate(state.player.angle);
+            
+            // Player body
+            ctx.beginPath();
+            ctx.arc(0, 0, state.player.radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#55f';
+            ctx.fill();
+            
+            // Player gun
+            ctx.fillStyle = '#333';
+            ctx.fillRect(state.player.radius - 5, -5, 20, 10);
+            
+            ctx.restore();
+            
+            // Draw weapon indicator
+            ctx.fillStyle = '#fff';
+            ctx.font = '16px Arial';
+            ctx.fillText(`WEAPON: ${state.player.weapons.current.toUpperCase()}`, 10, canvas.height - 10);
+        }
+
+        // Render shadows
+        function renderShadows() {
+            // Clear shadows
+            state.shadows = [];
+            
+            // Create shadows for enemies
+            for (const enemy of state.enemies) {
+                const shadow = {
+                    x: enemy.x,
+                    y: enemy.y,
+                    radius: enemy.radius * 1.5,
+                    opacity: 0.7
+                };
+                state.shadows.push(shadow);
+            }
+            
+            // Create shadow for player
+            state.shadows.push({
+                x: state.player.x,
+                y: state.player.y,
+                radius: state.player.radius * 1.5,
+                opacity: 0.7
+            });
+            
+            // Draw shadows
+            for (const shadow of state.shadows) {
+                const gradient = ctx.createRadialGradient(
+                    shadow.x, shadow.y, 0,
+                    shadow.x, shadow.y, shadow.radius
+                );
+                gradient.addColorStop(0, `rgba(0, 0, 0, ${shadow.opacity})`);
+                gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                
+                ctx.beginPath();
+                ctx.arc(shadow.x, shadow.y, shadow.radius, 0, Math.PI * 2);
+                ctx.fillStyle = gradient;
+                ctx.fill();
+            }
+        }
+
+        // Spawn enemy
+        function spawnEnemy() {
+            // Random position outside view
+            let x, y;
+            if (Math.random() < 0.5) {
+                x = Math.random() < 0.5 ? -50 : canvas.width + 50;
+                y = Math.random() * canvas.height;
+            } else {
+                x = Math.random() * canvas.width;
+                y = Math.random() < 0.5 ? -50 : canvas.height + 50;
+            }
+            
+            // Random enemy type
+            const type = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
+            const health = type.health * (1 + state.wave * 0.2); // Enemies get stronger each wave
+            
+            state.enemies.push({
+                x: x,
+                y: y,
+                radius: type.radius,
+                speed: type.speed,
+                color: type.color,
+                health: health,
+                maxHealth: health
+            });
+        }
+
+        // Spawn buff
+        function spawnBuff() {
+            const buffType = buffTypes[Math.floor(Math.random() * buffTypes.length)];
+            
+            state.buffs.push({
+                x: Math.random() * (canvas.width - 100) + 50,
+                y: Math.random() * (canvas.height - 100) + 50,
+                radius: 15,
+                color: buffType.color,
+                type: buffType
+            });
+        }
+
+        // Apply buff to player
+        function applyBuff(buffType, timestamp) {
+            // Add to active buffs
+            state.player.buffs.active.push({
+                type: buffType.type,
+                expires: timestamp + buffType.duration,
+                multiplier: buffType.multiplier,
+                value: buffType.value
+            });
+            
+            // Update player stats
+            updatePlayerBuffs();
+            
+            // Show indicator
+            const indicator = document.getElementById('buffIndicator');
+            indicator.textContent = `${buffType.type.toUpperCase()} BUFF ACTIVE!`;
+            indicator.style.color = buffType.color;
+            
+            setTimeout(() => {
+                indicator.textContent = '';
+            }, 2000);
+        }
+
+        // Update active buffs
+        function updateBuffs(timestamp) {
+            let updated = false;
+            
+            for (let i = state.player.buffs.active.length - 1; i >= 0; i--) {
+                const buff = state.player.buffs.active[i];
+                
+                if (timestamp > buff.expires) {
+                    state.player.buffs.active.splice(i, 1);
+                    updated = true;
+                }
+            }
+            
+            if (updated) {
+                updatePlayerBuffs();
+            }
+        }
+
+        // Update player buff stats
+        function updatePlayerBuffs() {
+            // Reset all buffs
+            state.player.buffs.damage = 1;
+            state.player.buffs.speed = 1;
+            state.player.buffs.healthRegen = 0;
+            
+            // Apply active buffs
+            for (const buff of state.player.buffs.active) {
+                if (buff.type === 'damage') {
+                    state.player.buffs.damage = buff.multiplier;
+                } else if (buff.type === 'speed') {
+                    state.player.buffs.speed = buff.multiplier;
+                } else if (buff.type === 'healthRegen') {
+                    state.player.buffs.healthRegen = buff.value;
+                }
+            }
+        }
+
+        // Shoot projectile
+        function shoot() {
+            const weapon = state.player.weapons[state.player.weapons.current];
+            
+            // Check fire rate
+            if (state.gameTime - weapon.lastShot < weapon.fireRate) return;
+            weapon.lastShot = state.gameTime;
+            
+            if (state.player.weapons.current === 'pistol') {
+                // Single bullet
+                state.projectiles.push({
+                    x: state.player.x + Math.cos(state.player.angle) * state.player.radius,
+                    y: state.player.y + Math.sin(state.player.angle) * state.player.radius,
+                    angle: state.player.angle,
+                    speed: 10,
+                    radius: 5,
+                    damage: weapon.damage,
+                    color: '#ff0'
+                });
+            } else if (state.player.weapons.current === 'shotgun') {
+                // Multiple pellets
+                for (let i = 0; i < weapon.pellets; i++) {
+                    const spread = (Math.random() - 0.5) * weapon.spread;
+                    state.projectiles.push({
+                        x: state.player.x + Math.cos(state.player.angle) * state.player.radius,
+                        y: state.player.y + Math.sin(state.player.angle) * state.player.radius,
+                        angle: state.player.angle + spread,
+                        speed: 12,
+                        radius: 3,
+                        damage: weapon.damage,
+                        color: '#f80'
+                    });
+                }
+            }
+            
+            // Muzzle flash
+            spawnParticles(
+                state.player.x + Math.cos(state.player.angle) * state.player.radius,
+                state.player.y + Math.sin(state.player.angle) * state.player.radius,
+                '#ff0',
+                5
+            );
+        }
+
+        // Spawn particles
+        function spawnParticles(x, y, color, count) {
+            for (let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 3 + 1;
+                
+                state.particles.push({
+                    x: x,
+                    y: y,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    radius: Math.random() * 3 + 1,
+                    color: color,
+                    life: Math.random() * 30 + 20,
+                    maxLife: 50
+                });
+            }
+        }
+
+        // Reset game
+        function resetGame() {
+            state.player.health = 100;
+            state.player.x = canvas.width / 2;
+            state.player.y = canvas.height / 2;
+            state.enemies = [];
+            state.projectiles = [];
+            state.particles = [];
+            state.kills = 0;
+            state.wave = 1;
+            state.player.buffs.active = [];
+            updatePlayerBuffs();
+            
+            // Update HUD
+            document.getElementById('health').textContent = state.player.health;
+            document.getElementById('kills').textContent = state.kills;
+            document.getElementById('wave').textContent = state.wave;
+        }
+
+        // Start game
+        gameLoop(0);
+    </script>
+</body>
+</html>
