@@ -1,0 +1,570 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebDOOM - Infinite Carnage</title>
+    <style>
+        body { margin: 0; overflow: hidden; background: #000; }
+        canvas { display: block; }
+        #hud {
+            position: absolute; top: 10px; left: 10px;
+            color: #fff; font-family: 'Courier New', monospace;
+            font-size: 18px; text-shadow: 2px 2px 4px #000;
+        }
+        #buffIndicator {
+            position: absolute; bottom: 20px; right: 20px;
+            color: #0f0; font-family: 'Courier New', monospace;
+            font-size: 16px; text-shadow: 1px 1px 2px #000;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="hud">
+        HEALTH: <span id="health">100</span> | 
+        AMMO: <span id="ammo">∞</span> | 
+        KILLS: <span id="kills">0</span> | 
+        WAVE: <span id="wave">1</span>
+    </div>
+    <div id="buffIndicator"></div>
+
+    <script>
+        // Инициализация canvas
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+
+        // Состояние игры
+        const game = {
+            player: {
+                x: canvas.width / 2,
+                y: canvas.height / 2,
+                radius: 20,
+                health: 100,
+                speed: 5,
+                angle: 0,
+                weapons: {
+                    current: 'pistol',
+                    pistol: { damage: 25, fireRate: 300, lastShot: 0, infinite: true },
+                    shotgun: { damage: 10, fireRate: 800, lastShot: 0, pellets: 8, spread: 0.3, infinite: true },
+                    minigun: { damage: 8, fireRate: 100, lastShot: 0, infinite: true }
+                },
+                buffs: {
+                    damage: 1,
+                    speed: 1,
+                    healthRegen: 0,
+                    active: []
+                }
+            },
+            enemies: [],
+            projectiles: [],
+            particles: [],
+            buffs: [],
+            shadows: [],
+            kills: 0,
+            wave: 1,
+            spawnRate: 2000,
+            lastSpawn: 0,
+            lastBuffSpawn: 0,
+            buffSpawnRate: 15000,
+            keys: { w: false, a: false, s: false, d: false, '1': false, '2': false, '3': false }
+        };
+
+        // Типы врагов
+        const enemyTypes = [
+            { color: '#f00', speed: 1.5, radius: 18, health: 30 }, // Медленный, жирный
+            { color: '#f80', speed: 2.2, radius: 14, health: 20 }, // Средний
+            { color: '#8f0', speed: 3, radius: 10, health: 15 }    // Быстрый
+        ];
+
+        // Типы баффов
+        const buffTypes = [
+            { type: 'damage', color: '#f00', duration: 10000, multiplier: 2 },
+            { type: 'speed', color: '#0af', duration: 10000, multiplier: 1.5 },
+            { type: 'healthRegen', color: '#0f0', duration: 15000, value: 1 },
+            { type: 'health', color: '#f0f', duration: 0, value: 30 }
+        ];
+
+        // Обработчики событий
+        window.addEventListener('resize', () => {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            game.player.angle = Math.atan2(
+                e.clientY - rect.top - game.player.y,
+                e.clientX - rect.left - game.player.x
+            );
+        });
+
+        canvas.addEventListener('click', shoot);
+
+        window.addEventListener('keydown', (e) => {
+            if (game.keys.hasOwnProperty(e.key)) game.keys[e.key] = true;
+            if (e.key === '1') game.player.weapons.current = 'pistol';
+            if (e.key === '2') game.player.weapons.current = 'shotgun';
+            if (e.key === '3') game.player.weapons.current = 'minigun';
+        });
+
+        window.addEventListener('keyup', (e) => {
+            if (game.keys.hasOwnProperty(e.key)) game.keys[e.key] = false;
+        });
+
+        // Основной игровой цикл
+        function gameLoop(timestamp) {
+            update(timestamp);
+            render();
+            requestAnimationFrame(gameLoop);
+        }
+
+        // Обновление состояния игры
+        function update(timestamp) {
+            // Движение игрока
+            const moveX = (game.keys.d ? 1 : 0) + (game.keys.a ? -1 : 0);
+            const moveY = (game.keys.s ? 1 : 0) + (game.keys.w ? -1 : 0);
+            
+            if (moveX !== 0 || moveY !== 0) {
+                const length = Math.sqrt(moveX * moveX + moveY * moveY);
+                const normX = moveX / length;
+                const normY = moveY / length;
+                
+                game.player.x += normX * game.player.speed * game.player.buffs.speed;
+                game.player.y += normY * game.player.speed * game.player.buffs.speed;
+                
+                // Границы экрана
+                game.player.x = Math.max(game.player.radius, Math.min(canvas.width - game.player.radius, game.player.x));
+                game.player.y = Math.max(game.player.radius, Math.min(canvas.height - game.player.radius, game.player.y));
+            }
+            
+            // Регенерация здоровья
+            if (game.player.buffs.healthRegen > 0) {
+                game.player.health = Math.min(100, game.player.health + game.player.buffs.healthRegen * 0.016);
+                document.getElementById('health').textContent = Math.floor(game.player.health);
+            }
+            
+            // Обновление баффов
+            updateBuffs(timestamp);
+            
+            // Спавн врагов
+            if (timestamp - game.lastSpawn > game.spawnRate) {
+                spawnEnemy();
+                game.lastSpawn = timestamp;
+                game.spawnRate = Math.max(500, 2000 - game.wave * 100);
+            }
+            
+            // Спавн баффов
+            if (timestamp - game.lastBuffSpawn > game.buffSpawnRate) {
+                spawnBuff();
+                game.lastBuffSpawn = timestamp;
+            }
+            
+            // Обновление врагов
+            for (let i = game.enemies.length - 1; i >= 0; i--) {
+                const enemy = game.enemies[i];
+                const angle = Math.atan2(game.player.y - enemy.y, game.player.x - enemy.x);
+                
+                enemy.x += Math.cos(angle) * enemy.speed;
+                enemy.y += Math.sin(angle) * enemy.speed;
+                
+                // Коллизия с игроком
+                const dist = Math.hypot(game.player.x - enemy.x, game.player.y - enemy.y);
+                if (dist < game.player.radius + enemy.radius) {
+                    game.player.health -= 1;
+                    document.getElementById('health').textContent = Math.floor(game.player.health);
+                    
+                    // Отталкивание
+                    const knockback = 5;
+                    enemy.x -= Math.cos(angle) * knockback;
+                    enemy.y -= Math.sin(angle) * knockback;
+                    game.player.x += Math.cos(angle) * knockback;
+                    game.player.y += Math.sin(angle) * knockback;
+                }
+                
+                // Смерть врага
+                if (enemy.health <= 0) {
+                    game.enemies.splice(i, 1);
+                    game.kills++;
+                    document.getElementById('kills').textContent = game.kills;
+                    spawnParticles(enemy.x, enemy.y, enemy.color, 10);
+                    
+                    // Новая волна
+                    if (game.enemies.length === 0) {
+                        game.wave++;
+                        document.getElementById('wave').textContent = game.wave;
+                        game.lastSpawn = timestamp;
+                    }
+                }
+            }
+            
+            // Обновление снарядов
+            for (let i = game.projectiles.length - 1; i >= 0; i--) {
+                const proj = game.projectiles[i];
+                proj.x += Math.cos(proj.angle) * proj.speed;
+                proj.y += Math.sin(proj.angle) * proj.speed;
+                
+                // Выход за границы
+                if (proj.x < 0 || proj.x > canvas.width || proj.y < 0 || proj.y > canvas.height) {
+                    game.projectiles.splice(i, 1);
+                    continue;
+                }
+                
+                // Попадание по врагам
+                for (let j = 0; j < game.enemies.length; j++) {
+                    const enemy = game.enemies[j];
+                    const dist = Math.hypot(proj.x - enemy.x, proj.y - enemy.y);
+                    
+                    if (dist < enemy.radius) {
+                        enemy.health -= proj.damage * game.player.buffs.damage;
+                        game.projectiles.splice(i, 1);
+                        spawnParticles(enemy.x, enemy.y, enemy.color, 3);
+                        break;
+                    }
+                }
+            }
+            
+            // Обновление частиц
+            for (let i = game.particles.length - 1; i >= 0; i--) {
+                const part = game.particles[i];
+                part.x += part.vx;
+                part.y += part.vy;
+                part.life--;
+                
+                if (part.life <= 0) game.particles.splice(i, 1);
+            }
+            
+            // Обновление баффов
+            for (let i = game.buffs.length - 1; i >= 0; i--) {
+                const buff = game.buffs[i];
+                const dist = Math.hypot(game.player.x - buff.x, game.player.y - buff.y);
+                
+                if (dist < game.player.radius + buff.radius) {
+                    applyBuff(buff.type, timestamp);
+                    game.buffs.splice(i, 1);
+                }
+            }
+            
+            // Конец игры
+            if (game.player.health <= 0) {
+                alert(`GAME OVER! Kills: ${game.kills} | Wave: ${game.wave}`);
+                resetGame();
+            }
+        }
+
+        // Отрисовка игры
+        function render() {
+            // Фон
+            ctx.fillStyle = '#111';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            // Тени
+            renderShadows();
+            
+            // Баффы
+            for (const buff of game.buffs) {
+                ctx.beginPath();
+                ctx.arc(buff.x, buff.y, buff.radius, 0, Math.PI * 2);
+                ctx.fillStyle = buff.color;
+                ctx.fill();
+                
+                // Пульсация
+                const pulse = Math.sin(Date.now() * 0.005) * 3;
+                ctx.beginPath();
+                ctx.arc(buff.x, buff.y, buff.radius + pulse, 0, Math.PI * 2);
+                ctx.strokeStyle = buff.color;
+                ctx.lineWidth = 2;
+                ctx.stroke();
+            }
+            
+            // Враги
+            for (const enemy of game.enemies) {
+                // Тело
+                ctx.beginPath();
+                ctx.arc(enemy.x, enemy.y, enemy.radius, 0, Math.PI * 2);
+                ctx.fillStyle = enemy.color;
+                ctx.fill();
+                
+                // Полоска здоровья
+                const healthPercent = enemy.health / enemy.maxHealth;
+                ctx.fillStyle = '#f00';
+                ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 10, enemy.radius * 2, 5);
+                ctx.fillStyle = '#0f0';
+                ctx.fillRect(enemy.x - enemy.radius, enemy.y - enemy.radius - 10, enemy.radius * 2 * healthPercent, 5);
+            }
+            
+            // Снаряды
+            for (const proj of game.projectiles) {
+                ctx.beginPath();
+                ctx.arc(proj.x, proj.y, proj.radius, 0, Math.PI * 2);
+                ctx.fillStyle = proj.color;
+                ctx.fill();
+            }
+            
+            // Частицы
+            for (const part of game.particles) {
+                ctx.globalAlpha = part.life / part.maxLife;
+                ctx.beginPath();
+                ctx.arc(part.x, part.y, part.radius, 0, Math.PI * 2);
+                ctx.fillStyle = part.color;
+                ctx.fill();
+                ctx.globalAlpha = 1;
+            }
+            
+            // Игрок
+            ctx.save();
+            ctx.translate(game.player.x, game.player.y);
+            ctx.rotate(game.player.angle);
+            
+            // Тело
+            ctx.beginPath();
+            ctx.arc(0, 0, game.player.radius, 0, Math.PI * 2);
+            ctx.fillStyle = '#55f';
+            ctx.fill();
+            
+            // Оружие
+            ctx.fillStyle = '#333';
+            ctx.fillRect(game.player.radius - 5, -5, 25, 10);
+            
+            ctx.restore();
+            
+            // Индикатор оружия
+            ctx.fillStyle = '#fff';
+            ctx.font = '16px Courier New';
+            ctx.fillText(`WEAPON: ${game.player.weapons.current.toUpperCase()}`, 10, canvas.height - 10);
+        }
+
+        // Отрисовка теней
+        function renderShadows() {
+            game.shadows = [];
+            
+            // Тени врагов
+            for (const enemy of game.enemies) {
+                game.shadows.push({
+                    x: enemy.x,
+                    y: enemy.y,
+                    radius: enemy.radius * 1.5,
+                    opacity: 0.7
+                });
+            }
+            
+            // Тень игрока
+            game.shadows.push({
+                x: game.player.x,
+                y: game.player.y,
+                radius: game.player.radius * 1.5,
+                opacity: 0.7
+            });
+            
+            // Отрисовка теней
+            for (const shadow of game.shadows) {
+                const gradient = ctx.createRadialGradient(
+                    shadow.x, shadow.y, 0,
+                    shadow.x, shadow.y, shadow.radius
+                );
+                gradient.addColorStop(0, `rgba(0, 0, 0, ${shadow.opacity})`);
+                gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+                
+                ctx.beginPath();
+                ctx.arc(shadow.x, shadow.y, shadow.radius, 0, Math.PI * 2);
+                ctx.fillStyle = gradient;
+                ctx.fill();
+            }
+        }
+
+        // Спавн врага
+        function spawnEnemy() {
+            let x, y;
+            if (Math.random() < 0.5) {
+                x = Math.random() < 0.5 ? -50 : canvas.width + 50;
+                y = Math.random() * canvas.height;
+            } else {
+                x = Math.random() * canvas.width;
+                y = Math.random() < 0.5 ? -50 : canvas.height + 50;
+            }
+            
+            const type = enemyTypes[Math.floor(Math.random() * enemyTypes.length)];
+            const health = type.health * (1 + game.wave * 0.2);
+            
+            game.enemies.push({
+                x: x,
+                y: y,
+                radius: type.radius,
+                speed: type.speed,
+                color: type.color,
+                health: health,
+                maxHealth: health
+            });
+        }
+
+        // Спавн баффа
+        function spawnBuff() {
+            const buffType = buffTypes[Math.floor(Math.random() * buffTypes.length)];
+            
+            game.buffs.push({
+                x: Math.random() * (canvas.width - 100) + 50,
+                y: Math.random() * (canvas.height - 100) + 50,
+                radius: 15,
+                color: buffType.color,
+                type: buffType
+            });
+        }
+
+        // Применение баффа
+        function applyBuff(buffType, timestamp) {
+            game.player.buffs.active.push({
+                type: buffType.type,
+                expires: timestamp + buffType.duration,
+                multiplier: buffType.multiplier,
+                value: buffType.value
+            });
+            
+            // Мгновенное восстановление здоровья
+            if (buffType.type === 'health') {
+                game.player.health = Math.min(100, game.player.health + buffType.value);
+                document.getElementById('health').textContent = Math.floor(game.player.health);
+            }
+            
+            updatePlayerBuffs();
+            
+            // Индикатор баффа
+            const indicator = document.getElementById('buffIndicator');
+            indicator.textContent = `${buffType.type.toUpperCase()} BUFF!`;
+            indicator.style.color = buffType.color;
+            
+            setTimeout(() => {
+                indicator.textContent = '';
+            }, 2000);
+        }
+
+        // Обновление баффов
+        function updateBuffs(timestamp) {
+            let updated = false;
+            
+            for (let i = game.player.buffs.active.length - 1; i >= 0; i--) {
+                const buff = game.player.buffs.active[i];
+                
+                if (timestamp > buff.expires && buff.expires !== 0) {
+                    game.player.buffs.active.splice(i, 1);
+                    updated = true;
+                }
+            }
+            
+            if (updated) updatePlayerBuffs();
+        }
+
+        // Обновление характеристик игрока
+        function updatePlayerBuffs() {
+            game.player.buffs.damage = 1;
+            game.player.buffs.speed = 1;
+            game.player.buffs.healthRegen = 0;
+            
+            for (const buff of game.player.buffs.active) {
+                if (buff.type === 'damage') game.player.buffs.damage = buff.multiplier;
+                if (buff.type === 'speed') game.player.buffs.speed = buff.multiplier;
+                if (buff.type === 'healthRegen') game.player.buffs.healthRegen = buff.value;
+            }
+        }
+
+        // Выстрел
+        function shoot() {
+            const weapon = game.player.weapons[game.player.weapons.current];
+            
+            if (performance.now() - weapon.lastShot < weapon.fireRate) return;
+            weapon.lastShot = performance.now();
+            
+            // Дульная вспышка
+            spawnParticles(
+                game.player.x + Math.cos(game.player.angle) * game.player.radius,
+                game.player.y + Math.sin(game.player.angle) * game.player.radius,
+                '#ff0',
+                5
+            );
+            
+            // Пистолет
+            if (game.player.weapons.current === 'pistol') {
+                game.projectiles.push({
+                    x: game.player.x + Math.cos(game.player.angle) * game.player.radius,
+                    y: game.player.y + Math.sin(game.player.angle) * game.player.radius,
+                    angle: game.player.angle,
+                    speed: 12,
+                    radius: 5,
+                    damage: weapon.damage,
+                    color: '#ff0'
+                });
+            }
+            // Дробовик
+            else if (game.player.weapons.current === 'shotgun') {
+                for (let i = 0; i < weapon.pellets; i++) {
+                    const spread = (Math.random() - 0.5) * weapon.spread;
+                    game.projectiles.push({
+                        x: game.player.x + Math.cos(game.player.angle) * game.player.radius,
+                        y: game.player.y + Math.sin(game.player.angle) * game.player.radius,
+                        angle: game.player.angle + spread,
+                        speed: 15,
+                        radius: 3,
+                        damage: weapon.damage,
+                        color: '#f80'
+                    });
+                }
+            }
+            // Миниган
+            else if (game.player.weapons.current === 'minigun') {
+                const spread = (Math.random() - 0.5) * 0.1;
+                game.projectiles.push({
+                    x: game.player.x + Math.cos(game.player.angle) * game.player.radius,
+                    y: game.player.y + Math.sin(game.player.angle) * game.player.radius,
+                    angle: game.player.angle + spread,
+                    speed: 18,
+                    radius: 4,
+                    damage: weapon.damage,
+                    color: '#f00'
+                });
+            }
+        }
+
+        // Спавн частиц
+        function spawnParticles(x, y, color, count) {
+            for (let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 3 + 1;
+                
+                game.particles.push({
+                    x: x,
+                    y: y,
+                    vx: Math.cos(angle) * speed,
+                    vy: Math.sin(angle) * speed,
+                    radius: Math.random() * 3 + 1,
+                    color: color,
+                    life: Math.random() * 30 + 20,
+                    maxLife: 50
+                });
+            }
+        }
+
+        // Сброс игры
+        function resetGame() {
+            game.player.health = 100;
+            game.player.x = canvas.width / 2;
+            game.player.y = canvas.height / 2;
+            game.enemies = [];
+            game.projectiles = [];
+            game.particles = [];
+            game.buffs = [];
+            game.kills = 0;
+            game.wave = 1;
+            game.player.buffs.active = [];
+            updatePlayerBuffs();
+            
+            document.getElementById('health').textContent = game.player.health;
+            document.getElementById('kills').textContent = game.kills;
+            document.getElementById('wave').textContent = game.wave;
+        }
+
+        // Запуск игры
+        gameLoop(0);
+    </script>
+</body>
+</html>
